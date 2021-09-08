@@ -1,6 +1,8 @@
 ---
 layout: post
 title: KVM GPU Passthrough
+author: NickSu
+tags: [kvm, hw]
 date: 2016-04-11 23:32:24.000000000 +09:00
 ---
 
