@@ -1,0 +1,73 @@
+---
+layout: post
+title: K8s系列之RBAC
+date: 2019-04-19 16:24:16.000000000 +08:00
+---
+
+前几天突发奇想，把以前自己写的ansible部署k8集群的脚本改成saltstack，说干就干，结果一不小心就把下载到本地的kube的几个二进制可执行文件给删了，因为众所周知的原因，下载这几个东西还挺麻烦。打开下载链接发现现在最新都是 1.14.1 了， 在这里 [下载链接](https://github.com/kubernetes/kubernetes/blob/master/CHANGELOG-1.14.md) ，就直接下载了1.14，结果脚本改好部署完却起不来.
+
+kube-apiserver 报错，说这个`--enable-admission-plugins`参数不正确，才发现 1.12 版本适用的几个在 1.14 都没有了，改完正常起来后部署了几个deployment都很正常。直到要进到容器里看文件的时候出现了问题：
+```shell
+nick@x79:~$ kubectl exec busybox cat /etc/resolv.conf
+error: unable to upgrade connection: Forbidden (user=kubernetes, verb=create, resource=nodes, subresource=proxy)
+```
+看到这个报错就想是不是权限错误，因为 1.12 的时候我并没有弄过，对RBAC也没太多了解，只是大概知道 role, rolebinding, clusterrole, clusterrolebinding 这四个东西，但是更让我摸不着头脑的是为什么报错信息里的user是 `kubernetes`,因为我的用户并不叫这个名字，那会不会是kube的运行进程的用户呢，也不对阿，部署过程中我并没有创建这个用户，而且看了一下我的 `.kube/config` 里面的 user 也是 `admin`,那这个 `kubernetes`哪里来的呢？
+
+其实 k8 里的 RBAC 主要有两个概念，分别是 `role` 和 `rolebinding` , `role`可能有些书籍会翻译成角色，主要定义的是可以做什么，具体看下面这个yaml文档：
+```yaml
+kind: Role
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: pod-reader
+  namespace: default
+rules:
+- apiGroups: [""]
+  resources: ["pod"]
+  resourceNames: ["busybox"]
+  verbs: ["get", "update","patch"]
+```
+从metadata开始，name 指的是这个 role 的名字，也就是在运行 `kubectl get roles` 可以看到的名字。接下来的`namespace`指的是这个 role 所适用的范围，这个其实也类似于组的概念，我们这里写了`namespace:default`也就是说`kubectl get roles -n default`可以看到这个定义。说到这里，RBAC里面还有另外一个概念，但是跟这个 role 很类似的，就是`clusterrole`,它定义的是全局的一个 role ,适用于所有的namespace,因此它不需要定义`namespace`
+对于一个 role 来说，接下来的rules相对更重要一些，因为这里定义了这个role真正可以做的事情，像我们这里 `apiGroups` ,就是接下来的`resources`所属的 apiGroup，而`resources`就是这个 role 的执行对象了，像我们这个例子就是 pod 也就是说这个role 定义了对于 pod 的允许操作, 不难发现`resourceNames`就是 pod 的名字，也就是说上面一行说的是可以对 pod 做什么事情，加上这一行就是可以对名字为`resourceNames`的 pod 做什么事情了。那现在我们已经规定了作用对象，那能执行什么操作呢，就看接下来这个`verbs`,英语意思是动词，像我们这里就是可以对 pod 去 get, update, patch 。注意如果设置了 resourceNames ,那 verb 这里就不能是 list, watch, create, 或者 delete了。 这样这一整个yaml文件就会被kubernetes理解成“创建一个名字叫 pod-reader 仅适用于 default 这个 namespace 的role,它仅仅可以对名字为 busybox 的 pod 作出 get,update, patch 的操作”。
+好了，现在我们有个自定义的 role 了，那这个 role 怎么应用呢，接下来就是第二个概念了`rolebinding`, binding 的意思是绑定，但是别理解错了，这里并不是说把系统用户跟k8的 role 绑定,那是什么用户呢，且看看下面的yaml先：
+```yaml
+kind: RoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: admin
+  namespace: default
+subjects:
+- kind: User
+  name: test # Name is case sensitive
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: Role
+  name: pod-reader
+  apiGroup: rbac.authorization.k8s.io
+```
+这个 yaml 文件告诉 kubernete 把刚才创建的 pod-reader 的 role 赋予给 test 这个用户，我们先解释这个文件再说这个用户什么。还是从 metadata 开始，这里的 name 就是 `kubectl get rolebindings` 的时候看到的名字，下面的 namespace 表示这个 rolebind 作用在哪个 namespace ，跟 role 一样， rolebinding 也区分 namespace ，当然不同 namespace 的 rolebinding 和 role 是无法绑定的。subjects 里面定义了绑定的用户或者组，也就是 kind 这里，我们这里是 User ,所以这个 test 就是用户的名字. 接下来的 roleRef 就定义了绑定什么 role 了， 像我们这里就是绑定到 pod-reader 了。因此 kubernetes 就会这样理解这个文件：
+允许用户 test 获得 pod-reader 这个 role 的权限，也就是可以对名字为 busybox 的 pod 作出 get,update, patch 的操作
+到了这里，相信你已经对 role, rolebinding 有个基本认知了吧，相对应 role, rolebinding 还有 clusterrole , clusterrolebinding, 他们的差别就是 cluster 的是针对整个集群，因此定义过程中不需要声明 namespace 。
+
+接下来，我们就要聊聊用户了，为什么我上面那个报错会报 `user=kubernetes` 呢？ rolebinding 的 yaml 文件里面的 user 是哪里来的呢？
+
+先说说我是如何解决那个报错的，只要把这个 kubernetes 用户绑定到 system:kubelet-api-admin 的这个 clusterrole, 其实也就是创建一个 clusterrolebinding 就可以了。
+可能很多新用户都不知道apiserver是如何验证用户的，那是因为像使用kubeadm等工具自动部署完集群后会生成一个 admin.kubeconfig, 好像是叫这个名字，然后会要求你把这个文件拷贝到自己的 HOME 目录的 .kube/config ，这样每次执行 kubectl 命令就会自动读取这个文件去验证，看看这个文件就知道里面包含了客户端的证书和 key 。所以呢，我们执行 kubectl 的时候，就是使用这个证书去跟 apiserver 验证的，这个就是 x509 验证，而 apiserver 会把证书的 CN 当作用户名，刚好我们这个证书的 CN 是 kubernetes ，所以这个错误才会说是 `user=kubernetes`,也就是因此我们绑定了这个用户和对应的权限，就可以通过 apiserver 的验证了。 
+我自己也做了个实验验证了一把，首先我创建一个新的证书，并指定CN=usernotexist ， 然后再生成 kubeconfig 以供认证，结果果然报错如下：
+```shell
+nick@x79:/tmp/testcert$ kubectl get pods --kubeconfig=kubeconfig.bak
+Error from server (Forbidden): pods is forbidden: User "usernotexist" cannot list resource "pods" in API group "" in the namespace "default": 
+
+nick@x79:/tmp/testcert$ kubectl create clusterrolebinding master-test --clusterrole admin --user usernotexist
+clusterrolebinding.rbac.authorization.k8s.io/master-test created
+nick@x79:/tmp/testcert$ kubectl get pods --kubeconfig=kubeconfig.bak
+NAME                                  READY   STATUS    RESTARTS   AGE
+busybox-deployment-57b645c6cd-s8n6f   1/1     Running   6          12h
+busybox-deployment-57b645c6cd-sx5nw   1/1     Running   6          12h
+nginx-deployment-6dd86d77d-dm46v      1/1     Running   1          12h
+nginx-deployment-6dd86d77d-g7szj      1/1     Running   1          12h
+```
+
+
+
+参考文档：
+[官档](https://kubernetes.io/docs/reference/access-authn-authz/rbac/#default-roles-and-role-bindings) 

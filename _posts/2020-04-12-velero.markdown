@@ -1,0 +1,217 @@
+---
+layout: post
+title: 你的 Kubernetes/Openshift 集群备份了吗
+date: 2020-04-12 18:32:24.000000000 +08:00
+---
+
+这段时间在研究如何备份我们的集群，因为我们的集群全是在 aws 上面，所以一开始就考虑分开备份各种资源，包括 deployment, svc, route, configmap, secret 等等， pvc 因为我们使用了 aws 的 ebs 所以是打算用 snapshot 来做的。但是细想这个做法有点麻烦，就是恢复的时候怎么对应到哪个 ebs 的 snapshot 是哪个应用的呢？不知道这个问题是否真的是一个问题，因为我知道 statefulset 会认准 PVC 对应的 EBS，但是 snapshot 恢复的应该名字不一样了，还能不能匹配上呢？ 这个就要打一个问号了。
+结果发现了 velero, 前身就是 heptio 的 ark, 然后今天自己试了一天就有了这个主题
+
+## 什么是 velero
+
+看[官网](https://velero.io/docs/v1.3.2/index.html)有一个特别简单直接的介绍， 它可以干嘛呢， 三点：
+
+1. 备份你的集群并在出事的时候可以恢复
+2. 迁移集群到其他集群
+3. 复制你的生产集群到开发或者测试环境
+
+它由什么组成呢，两个：
+
+1. 服务端，运行在集群里头
+2. 客户端，其实就是一个二进制文档，负责操作这个 velero
+
+所以呢， velero 就是这么一款工具，刚好满足我们的需求，可以用来备份 kubernetes 集群的资源和存储卷，必要的时候可以恢复。
+
+## 具体一点 velero 是什么东西呢
+
+这个从安装过程中就可以一窥一二，首先有好几个 CustomResourceDefinition，让我们看看这是一些什么：
+
+### backups.velero.io
+
+仔细看这个对象，主要是定义了 velero 如何描述一个 backup 对象，也就是说比如 deployment, 那 k8s 怎么将资源当作 deployment 去操作呢，首先就是看 kind , 然后里面就有不同的 spec 比如说镜像，数量，名称等等。所以对于这个 velero 的 backup 对象，它也定义了类似的东西， metadata kind 什么的我就不说了，看看一些不同的 spec:
+
+* Excluded Namespaces: 列表，这个 Namespace 里面的资源不会包含在这个 backup 里面
+* Excluded Resources: 列表，这里的资源不会包含在这个 backup 里面
+* Hooks: 可以设置备份发生的时候要触发什么动作
+* Included Cluster Resources: 列表，集群级别的资源是否要备份
+* Included Namespaces： 列表，命名空间是否要备份
+* Included Resources： 列表， 资源是否要备份
+* Label Selector： 通过标签来判断哪些资源需要备份
+* Snapshot Volume： 布尔类型，是否在备份的时候要把 PV 做 snapshot
+* Storage Location: 字符串， backup 存储在哪里
+* TTL： backup 会保持多久
+* Volume Snapshot Location： 对应snapshot 的保存地址
+
+### backupstoragelocations.velero.io
+
+这个对象声明了 BackupStorageLocation 相关的一些信息， spec 如下：
+
+* accessMode： 定义了 backup 存储的权限，支持 ReadOnly 跟 ReadWrite
+* backupSyncPeriod： 多久要从对象存储同步一次 backup， 这个不明白什么意思，难道不是有备份的时候就存到对象存储吗，为什么还要 同步
+* config: cloud provider 一些需要的特殊配置
+* objectStorage： 对象存储的连接信息，比如说 s3 的 bucket 和 prefix 等等
+* provider： cloud provider 的信息，aws 或者 azure
+
+这里要求一定要配置的有两个，就是 provider 和 objectStorage，至少要告诉 velero 怎么去存储
+
+### deletebackuprequests.velero.io
+
+这个对象定义了要删除某一个 backup 的信息，它的 spec 也简单，就一个：
+
+* backupName: 字符串类型的一个 backup 名称，velero 通过这个名称去删除 backup
+
+### downloadrequests.velero.io
+
+这个对象定义了一个 download request 需要的信息，spec 如下：
+
+* kind：下载请求的类型，有 BackupLog， BackupContents， BackupVolumeSnapshots， BackupResourceList， RestoreLog， RestoreResults
+* name：这个类型的名字
+
+### podvolumebackups.velero.io
+
+这个定义了 PodVolumeBackup 所需的信息，包括：
+
+* backupStorageLocation： 要备份到哪里
+* node: pod 运行的节点名称
+* pod: 要备份的 pod ，这个是一个对象，里面又包括了 kind, name, namespace 等等， 不明白 fieldPath 是干嘛的 #UNKNOWN
+* repoIdentifier： resticrepo 的标识
+* tags：会应用在 backup 的标签
+* volume： 要备份的 volume 名字
+
+### podvolumerestores.velero.io
+
+类似于上面，不同的是这次是关于 PodVolumeRestore
+
+* backupStorageLocation: 备份存储的位置
+* pod: 要恢复到哪个 pod
+* repoIdentifier: repo 的标识
+* snapshotID: 要恢复的 snapshot ID
+* volume： 要恢复的 volume 名字
+
+### resticrepositories.velero.io
+
+ResticRepository 的信息，[restic](https://velero.io/docs/master/restic/) 一个开源的备份工具，如果你使用的 PV backend 是 EBS 或者 azure blob 这种天生支持 snapshot 功能的存储，那就不需要了解这个，如果是使用 NFS， EFS 等不支持 snapshot 的就可能会需要这个工具，所以这个不是一定要的
+
+* backupStorageLocation：这一个 repo 的 BackupStorageLocation 的名称
+* maintenanceFrequency： 多久运行一次 maintenance
+* resticIdentifier: 这个 repo 的标识
+* volumeNamespace： 这个 repo 备份了哪个 namespace
+
+### restores.velero.io
+
+定义了 restore 所需的信息， 包括：
+
+* backupName： 要恢复的 backup 的名字, 必填
+* excludedNamespaces： 不恢复的 namespace 列表
+* excludedResources： 不恢复的资源列表
+* includeClusterResources： 布尔类型，是否要恢复 cluster 级别的资源，默认是 true
+* includedNamespaces: 要恢复的 namespace 列表，默认是所有
+* includedResources： 要恢复的资源列表，默认是所有
+* labelSelector： 标签选择要恢复的资源
+* namespaceMapping： 可以把一个 namespace 的东西恢复到其他 namespace, 默认是恢复到同名的 namespace
+* restorePVs: 布尔类型，是否要恢复所有 PV
+* scheduleName: 定期恢复的名字，如果没有指定 backupName ，那就会从最新的 backup 恢复
+
+### schedules.velero.io
+
+定义了一个 schedule 的相关信息，包括：
+
+* schedule： 这个任务要怎么运行，采用 cron 格式的时间写法
+* template: 定时任务要如何运行这个 backup, 参考上面的 “backups.velero.io”
+
+### serverstatusrequests.velero.io
+
+这个没看懂是什么  #UNKNOWN
+
+### volumesnapshotlocations.velero.io
+
+定义了 VolumeSnapshotLocation 的信息， 包括了：为什么没有 bucket #UNKNOWN
+
+* config： provider 相关
+* provider: cloud provider 的信息，aws 或者 azure
+
+## velero 怎么备份的
+
+velero 的备份主要分两种， on-demand 和 schedule, 其实 schedule 就是把 on-demand 的任务用 crontab 的方式定时跑起来而已，请参考上面 “schedules.velero.io” 的解释。在 schedule 创建的时候会发生第一次备份，然后后面的备份就安装 cronjob 的时间来了，它的名字格式是这样的“<SCHEDULE NAME>-<TIMESTAMP>”。
+下面主要看看 on-demand 是怎么运作的：
+
+1. 当我们执行命令 `velero backup create test-backup`, 会向 api-server 发送请求创建一个 backup 对象
+2. 当 backup-controller 发现有新的 backup 对象时，它会先验证 backup 对象
+3. backup-controller 根据 backup 对象的规则向 api-server 查询所需备份的资源，然后把所有资源收集起来，其实就相当于 `kubectl export` 各种资源，把所有资源保存成 yaml 格式
+4. backup-controller 向对象存储发起请求，把保存的资源存到对象存储上面去
+5. 默认情况下，backup-controller 会给所有的 PV 做 snapshot ，除非指定了 `--snapshot-volumes=false`
+
+需要注意的是，当 backup 进行的过程中，对象正在创建或者修改，有可能虽然这个对象是声明的需要备份的对象，但是它并不会被备份起来，这个或许可以通过 hook 去避免这种状况。
+
+可能你会留意到在定义 `backup.velero.io` 的时候， 有一个 TTL， 这个就是这个 backup 对象以及对象存储上面的备份文件的过期时间，当 velero 发现有 backup 过期了，它会把相关的东西全部删除掉，包括：backup 对象，PV 的 snapshot 和对象存储上的备份文件。
+
+另外，velero 会定期的去查询对象存储，因为它把对象存储当成唯一的验证标准，当对象存储上面有正确的备份文件而 api-server 里面却没有记录对应的 backup 对象时， velero 会自动创建一个 backup 对象，这样当需要在其他集群做恢复的时候也可以看到这个备份。但是如果 api-server 有 backup 对象，但是对象存储上面却没有对应的备份文件时，这个 backup 对象就会被删除掉。
+
+## velero 备份了什么
+
+```bash
+kdkd@mbp:[~/Downloads/nginx-backup-1]: ls
+nginx-backup-1-logs.gz                  nginx-backup-1-resource-list.json.gz    nginx-backup-1.tar.gz
+nginx-backup-1-podvolumebackups.json.gz nginx-backup-1-volumesnapshots.json.gz  velero-backup.json
+```
+
+这是我从一个备份下载下来的，可以看到它包含了这些东西，让我们一个一个看看里面是啥：
+
+1. velero-backup.json 这是这个备份发生时候对应的 backup 对象的 json 文件，也就是说这个命令的结果 `kubectl get backup nginx-backup-1 -o json`
+2. nginx-backup-1-logs.gz 备份的日志，从这个日志可以看出备份过程就是不断的“Listing items”， “Retrieved items“， ”Backing up item“， ”Backing up resource“
+3. nginx-backup-1-resource-list.json.gz 备份了什么内容，像我这个备份里面就备份了我的 pod, svc, replicaset 等等
+4. nginx-backup-1.tar.gz 这个解压出来其实就是 resource-list.json 里面罗列的各种资源的 json 格式
+
+## velero 怎么恢复的
+
+了解了如何备份，恢复就比较简单了。 像上面说过的会保存每一种资源的 json 文件，那恢复过来的时候其实就是用这个文件去创建对应的资源对象而已，但是需要注意的是 api 对象的组和版本，要求在恢复的集群里也有同样的组和版本，比如说我现在备份里面有一个 apiVersion 是 v1 的 namespace, 要恢复的时候就要求对应的集群里面也有 apiVersion 是 v1 的 namespace 这个对象注册了，如果没有就无法恢复。
+
+## velero 操作示例
+
+### 安装
+
+1. 下载 velero 二进制文件 [下载地址]（https://github.com/vmware-tanzu/velero/releases/tag/v1.3.2）
+2. 如果是使用 s3 作为存储的位置，则需要准备一个验证文件，比如：
+```bash
+[default]
+aws_access_key_id = ****
+aws_secret_access_key = ******
+```
+3. 需要在你的 S3 创建一个 bucket , 这个名字在下面的安装里要用到
+4. 执行下列命令安装：
+```bash
+velero install     --provider aws     --plugins velero/velero-plugin-for-aws:v1.0.0     --bucket YOURS3BUCKETNAME     --secret-file ./credentials-velero     --use-volume-snapshots=false     --backup-location-config region=minio,s3ForcePathStyle="true",s3Url=http://YOURS3URL --kubeconfig=YOURKUBECONFIGIFNEED
+```
+
+### 备份
+
+这个命令执行一次性备份： `velero backup create nginx-backup --selector app=nginx`， 意思就是只要匹配到标签 app=nginx 的东西就会被备份，如果有 pvc 也会被做 snapshot， 前提是你使用的存储支持 snapshot
+
+除了上面跑命令的方式，也可以直接编写 yaml 然后 `kubectl apply -f yaml`
+
+``` yaml
+apiVersion: velero.io/v1
+kind: Backup
+metadata:
+  labels:
+    velero.io/storage-location: default
+  name: registry-backup-with-pv
+  namespace: velero
+spec:
+  hooks: {}
+  includedNamespaces:
+  - '*'
+  labelSelector:
+    matchLabels:
+      app: registry
+  storageLocation: default
+  ttl: 5m0s
+```
+
+### 恢复
+
+恢复也简单，也就是一行命令而已： `velero restore create --from-backup nginx-backup` , 这个名字要是 `velero backup get` 的名字，这样才能找到备份的文件。
+
+## 后记
+
+使用这个工具很好的解决了我们的问题，而且目前也没碰到什么问题，希望大家的集群都非常安全不需要备份，天下无贼！！！
