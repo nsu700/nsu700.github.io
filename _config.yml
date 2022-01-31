@@ -3,7 +3,11 @@ title: Mr.可豆
 subtitle: 可豆先生的生活，技术和学习
 welcome_message: Quality-focused Systems Engineer, support in different OS based system and Virtualization.
 permalink: /:year/:month/:title/
-theme: jekyll-theme-hacker
+#theme: jekyll-theme-hacker
+## https://github.com/pages-themes/cayman
+remote_theme: pages-themes/cayman@v0.2.0
+plugins:
+- jekyll-remote-theme
 
 # Pagination
 gems: [jekyll-paginate]
