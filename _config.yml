@@ -1,6 +1,7 @@
 # Site
 title: Mr.可豆
-subtitle: 可豆先生的生活，技术和学习
+description: 可豆先生的生活，技术和学习
+show_downloads: false
 welcome_message: Quality-focused Systems Engineer, support in different OS based system and Virtualization.
 permalink: /:year/:month/:title/
 #theme: jekyll-theme-hacker

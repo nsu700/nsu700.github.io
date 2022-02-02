@@ -2,6 +2,7 @@
 layout: post
 title: 你的 Kubernetes/Openshift 集群备份了吗
 date: 2020-04-12 18:32:24.000000000 +08:00
+tags: [k8s, backup]
 ---
 
 这段时间在研究如何备份我们的集群，因为我们的集群全是在 aws 上面，所以一开始就考虑分开备份各种资源，包括 deployment, svc, route, configmap, secret 等等， pvc 因为我们使用了 aws 的 ebs 所以是打算用 snapshot 来做的。但是细想这个做法有点麻烦，就是恢复的时候怎么对应到哪个 ebs 的 snapshot 是哪个应用的呢？不知道这个问题是否真的是一个问题，因为我知道 statefulset 会认准 PVC 对应的 EBS，但是 snapshot 恢复的应该名字不一样了，还能不能匹配上呢？ 这个就要打一个问号了。
