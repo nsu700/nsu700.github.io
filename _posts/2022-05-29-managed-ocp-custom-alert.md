@@ -9,26 +9,26 @@ tags: [OCP, alert]
 
 This guide is heavily influenced by RH black belt teams’ [guide](https://mobb.ninja/docs/rosa/federated-metrics-prometheus/) for ROSA, but it not only works for ROSA
 
-It will need prometheus and grafana operators for this implementation, if you dont need grafana, just ignore it
+It will need prometheus and grafana operators for this implementation
 
 # Prepare Environment
 
 1. Set the namespace to locate the custom prometheus and alertmanager
 
-```go
+```bash
 export NAMESPACE=federated-metrics
 ```
 
 1. Create the project
 
-```go
+```bash
 oc new-project $NAMESPACE
 ```
 
 1. Install operators in the OCP console
     1. Prometheus
         1. Operators ⇒ Search “Prometheus” in search bar ⇒ Click the `Prometheus Opertor` ⇒ Click `Continue` on the warning page ⇒ Click `Install` ⇒ In the `Installation mode`, choose `A specific namespace on the cluster` and pick the Project Name in the drop down list ⇒ Click `Install`
-    2. Grafana (Optional)
+    2. Grafana 
         1. Operators ⇒ Search “Grafana” in search bar ⇒ Click the `Grafana Operator` ⇒ Click `Continue` on the warning page ⇒ Click `Install` ⇒ In the `Installation mode`, choose `A specific namespace on the cluster` and pick the Project Name in the drop down list ⇒ Click `Install`
         
 
@@ -36,16 +36,25 @@ oc new-project $NAMESPACE
 
 1. Verify the operators installed successfully in previous steps
 
-```go
+```bash
 ❯ oc get pods -n $NAMESPACE
 NAME                                                   READY   STATUS    RESTARTS      AGE           
 grafana-operator-controller-manager-7c84b74f89-776wm   2/2     Running   0             46m
 prometheus-operator-86757886d8-gljh6                   1/1     Running   0             46m
 ```
 
-1. Install the `mobb/rosa-federated-prometheus` helm chart
+1. Add the MOBB chart repository 
+```bash
+helm repo add mobb https://rh-mobb.github.io/helm-charts/
+```
 
-```go
+2. Update your repositories
+```bash
+helm repo update
+```
+3. Install the `mobb/rosa-federated-prometheus` helm chart
+
+```bash
 ❯  helm upgrade --install -n $NAMESPACE monitoring \
    --set grafana-cr.basicAuthPassword='mypassword' \
    --set fullnameOverride='monitoring' \
@@ -56,7 +65,7 @@ Release "monitoring" does not exist. Installing it now.
 
 1. Verify the `prometheus`, `alertmanager` are up and running
 
-```go
+```bash
 ❯ oc get pods
 NAME                                                   READY   STATUS    RESTARTS      AGE
 alertmanager-monitoring-alertmanager-cr-0              2/2     Running   0             36m
@@ -83,7 +92,7 @@ prometheus-operator-86757886d8-gljh6                   1/1     Running   0      
 
 1. Create yaml file for alertmanager config
 
-```go
+```bash
 ❯ cat monitoring-alertmanager-cr-config.yaml
 global:
   slack_api_url: $SLACK_API
@@ -100,14 +109,14 @@ route:
 
 1. Create secret for alertmanager config
 
-```go
+```bash
 ❯ oc create secret generic custom-alert-manager-config --from-file=alertmanager.yaml=monitoring-alertmanager-cr-config.yaml -n $NAMESPACE
 secret/custom-alert-manager-config created
 ```
 
 1. Update the alertmanager to reference the custom config
 
-```go
+```bash
 oc edit alertmanagers.monitoring.coreos.com monitoring-alertmanager-cr -n $NAMESPACE
 
 apiVersion: monitoring.coreos.com/v1
@@ -122,7 +131,7 @@ spec:
 
 1. Verify the alertmanager loaded the new config
 
-```go
+```bash
 ❯ oc debug alertmanager-monitoring-alertmanager-cr-0 -- cat /etc/alertmanager/config/alertmanager.yaml
 Defaulting container name to alertmanager.
 Use 'oc describe pod/alertmanager-monitoring-alertmanager-cr-0-debug -n federated-metrics' to see all of the containers in this pod.
@@ -147,7 +156,7 @@ Removing debug pod ...
 
 1. Create yaml file for alert rules, make sure the resource should be assigned two labels `prometheus: monitoring-prometheus-cr` and `role: alert-rules`
 
-```go
+```bash
 ❯ cat monitoring-custom-rules.yaml
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
@@ -185,14 +194,14 @@ spec:
 
 1. Create the prometheusrule
 
-```go
+```bash
 ❯ oc apply -f monitoring-custom-rules.yaml
 prometheusrule.monitoring.coreos.com/custom-rules created
 ```
 
 1. Verify the prometheusrules loaded into prometheus instance
 
-```go
+```bash
 debug into the prometheus pod and `cat /etc/prometheus/rules/prometheus-monitoring-prometheus-cr-rulefiles-0/*yaml`
 ```
 
@@ -200,7 +209,7 @@ debug into the prometheus pod and `cat /etc/prometheus/rules/prometheus-monitori
 
 1. Get the prometheus route
 
-```go
+```bash
 oc -n ${NAMESPACE} get route prometheus-route
 ```
 
