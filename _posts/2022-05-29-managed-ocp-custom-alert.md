@@ -152,6 +152,30 @@ route:
 Removing debug pod ...
 ```
 
+# Email notification 
+
+```bash
+sh-4.4$ cat /etc/alertmanager/config/alertmanager.yaml
+global:
+  resolve_timeout: 5m
+receivers:
+  - name: mail-alert
+    email_configs:
+      - to: SENDER_ADDRESS
+        from: FROM_ADDRESS
+        smarthost: 'smtp.sendgrid.net:587'
+        hello: SENDER_ADDRESS
+        auth_username: apikey
+        auth_password: $APIKEY
+route:
+  group_by:
+    - namespace
+  routes:
+    - receiver: mail-alert
+      match:
+        testlabel: 'true'
+```
+
 # Create custom prometheus rules
 
 1. Create yaml file for alert rules, make sure the resource should be assigned two labels `prometheus: monitoring-prometheus-cr` and `role: alert-rules`
