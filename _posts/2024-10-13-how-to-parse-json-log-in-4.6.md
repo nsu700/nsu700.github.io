@@ -1,4 +1,9 @@
-# How to parse json logs in 4.6
+---
+layout: post
+title: How to parse json logs in 4.6
+date: 2024-10-13 19:52:24.000000000 +08:00
+tags: [ocp]
+---
 
 If you check the official document of openshift, there is no json format parsing supported until 4.7, before 4.6, we can manually set the env "MERGE_JSON_LOG" to be "true" with unmanaged logging operator to force fluentd to parse json format. However the same does not apply to 4.6, as the env is not referenced any more in the fluentd config, if you dump the config of fluentd, you could find it
 
